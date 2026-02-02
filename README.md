@@ -29,7 +29,7 @@
 脚本在 [path/to/]launch-claude-code.sh
 ```
 
-把 `iTerm2` 换成你用的终端即可。
+把 `iTerm2` 换成你用的终端即可。当前脚本默认的终端是 Ghostty。
 
 ## License
 
