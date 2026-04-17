@@ -2,15 +2,15 @@
 
 # Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title Launch Claude Code
+# @raycast.title Launch Codex CLI
 # @raycast.mode silent
 
 # Optional parameters:
-# @raycast.icon 🤖
+# @raycast.icon 🧠
 # @raycast.packageName AI CLI Launchers
 
 # Documentation:
-# @raycast.description Launch Claude Code from the current Finder folder and follow cc switch
+# @raycast.description Launch Codex CLI from the current Finder folder and follow cc switch
 # @raycast.author Suda202
 
 # Ghostty launch modes:
@@ -28,7 +28,7 @@ TARGET_DIR=$(osascript -e '
   end tell' 2>/dev/null)
 
 TARGET_DIR="${TARGET_DIR:-$HOME}"
-TMP_SCRIPT="${TMPDIR:-/tmp}/claude-launch-$$.sh"
+TMP_SCRIPT="${TMPDIR:-/tmp}/codex-launch-$$.sh"
 TARGET_DIR_QUOTED=$(printf '%q' "$TARGET_DIR")
 
 cat > "$TMP_SCRIPT" << EOF
@@ -46,46 +46,59 @@ fi
 cd "$TARGET_DIR" || exit 1
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-while IFS='=' read -r key _; do
-  case "$key" in
-    ANTHROPIC_*) unset "$key" ;;
-  esac
-done < <(env)
+for node_bin in "$HOME"/.nvm/versions/node/*/bin(N); do
+  export PATH="$node_bin:$PATH"
+done
+
+unset OPENAI_API_KEY
+unset OPENAI_BASE_URL
+unset CODEX_API_KEY
 
 CC_SWITCH_DB="$HOME/.cc-switch/cc-switch.db"
-CLAUDE_ARGS=()
+CODEX_ARGS=()
 
 if command -v sqlite3 >/dev/null 2>&1 && [ -r "$CC_SWITCH_DB" ]; then
-  CURRENT_PROVIDER="$(sqlite3 "$CC_SWITCH_DB" "select name from providers where app_type='claude' and is_current=1 limit 1;" 2>/dev/null)"
+  CURRENT_PROVIDER="$(sqlite3 "$CC_SWITCH_DB" "select name from providers where app_type='codex' and is_current=1 limit 1;" 2>/dev/null)"
+  CURRENT_AUTH_MODE="$(sqlite3 "$CC_SWITCH_DB" "select json_extract(settings_config,'$.auth.auth_mode') from providers where app_type='codex' and is_current=1 limit 1;" 2>/dev/null)"
+  CURRENT_CONFIG="$(sqlite3 "$CC_SWITCH_DB" "select json_extract(settings_config,'$.config') from providers where app_type='codex' and is_current=1 limit 1;" 2>/dev/null)"
+
   if [ -n "$CURRENT_PROVIDER" ]; then
-    echo "[cc switch] Claude provider: $CURRENT_PROVIDER"
+    echo "[cc switch] Codex provider: $CURRENT_PROVIDER"
   fi
 
-  while IFS=$'\t' read -r key value; do
-    [ -n "$key" ] || continue
-    case "$key" in
-      ANTHROPIC_*|CLAUDE_CODE_*)
-        export "$key=$value"
-        if [ "$key" = "ANTHROPIC_API_KEY" ] && [ -n "$value" ]; then
-          CLAUDE_ARGS+=(--bare)
-        fi
-        ;;
-    esac
-  done < <(sqlite3 -separator $'\t' "$CC_SWITCH_DB" "select e.key, e.value from providers p, json_each(p.settings_config,'$.env') e where p.app_type='claude' and p.is_current=1;" 2>/dev/null)
+  USE_OPENAI_API_KEY=0
+  if [ "$CURRENT_AUTH_MODE" = "apikey" ] || printf '%s\n' "$CURRENT_CONFIG" | grep -q 'env_key = "OPENAI_API_KEY"'; then
+    USE_OPENAI_API_KEY=1
+  fi
+
+  if printf '%s\n' "$CURRENT_CONFIG" | grep -q 'base_url = "https://api.360.cn/v1"'; then
+    USE_OPENAI_API_KEY=1
+    CODEX_ARGS+=(-c 'model_providers.custom.env_key="OPENAI_API_KEY"')
+    CODEX_ARGS+=(-c 'model_providers.custom.requires_openai_auth=false')
+  fi
+
+  if [ "$USE_OPENAI_API_KEY" = "1" ]; then
+    KEY_FROM_CC_SWITCH="$(sqlite3 "$CC_SWITCH_DB" "select json_extract(settings_config,'$.auth.OPENAI_API_KEY') from providers where app_type='codex' and is_current=1 limit 1;" 2>/dev/null)"
+    if [ -n "$KEY_FROM_CC_SWITCH" ]; then
+      export OPENAI_API_KEY="$KEY_FROM_CC_SWITCH"
+    else
+      echo "[cc switch] Current Codex provider needs OPENAI_API_KEY, but cc switch has no saved key"
+    fi
+  fi
 fi
 
-CLAUDE_BIN="$(command -v claude 2>/dev/null)"
-if [ -z "$CLAUDE_BIN" ] && [ -x "$HOME/.local/bin/claude" ]; then
-  CLAUDE_BIN="$HOME/.local/bin/claude"
+CODEX_BIN="$(command -v codex 2>/dev/null)"
+if [ -z "$CODEX_BIN" ] && [ -x "$HOME/.local/bin/codex" ]; then
+  CODEX_BIN="$HOME/.local/bin/codex"
 fi
 
-if [ -z "$CLAUDE_BIN" ]; then
-  echo "[launch failed] claude command not found"
+if [ -z "$CODEX_BIN" ]; then
+  echo "[launch failed] codex command not found"
   read -k1
   exec /bin/zsh -l
 fi
 
-"$CLAUDE_BIN" "${CLAUDE_ARGS[@]}" || { echo "[launch failed] press any key to exit"; read -k1; }
+"$CODEX_BIN" "${CODEX_ARGS[@]}" || { echo "[launch failed] press any key to exit"; read -k1; }
 exec /bin/zsh -l
 EOF
 
