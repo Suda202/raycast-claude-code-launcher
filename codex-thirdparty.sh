@@ -453,6 +453,32 @@ if [ "$import_status" -ne 0 ]; then
   log_event "official history import failed status=$import_status; continuing launch"
 fi
 
+API_PROXY_SCRIPT="$CODEX_HOME_DIR/api-proxy.mjs"
+API_PROXY_PORT=18360
+API_PROXY_PID_FILE="$CODEX_HOME_DIR/.api-proxy.pid"
+
+ensure_api_proxy() {
+  if [ -f "$API_PROXY_PID_FILE" ]; then
+    local old_pid
+    old_pid="$(cat "$API_PROXY_PID_FILE" 2>/dev/null)"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      log_event "api-proxy already running pid=$old_pid"
+      return 0
+    fi
+  fi
+
+  if [ ! -f "$API_PROXY_SCRIPT" ]; then
+    log_event "api-proxy script not found: $API_PROXY_SCRIPT"
+    return 1
+  fi
+
+  nohup node "$API_PROXY_SCRIPT" >>"$LOG_FILE" 2>&1 &
+  echo $! >"$API_PROXY_PID_FILE"
+  log_event "api-proxy started pid=$! port=$API_PROXY_PORT"
+}
+
+ensure_api_proxy
+
 cd "$LAUNCH_CWD"
 
 if ! activate_existing_instance; then

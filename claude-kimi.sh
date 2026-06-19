@@ -24,17 +24,25 @@ tell application "Finder"
 end tell
 ')
 
-# Kimi 环境变量
-export ANTHROPIC_BASE_URL=https://api.moonshot.cn/api/anthropic
-export ANTHROPIC_AUTH_TOKEN=$KIMI_TOKEN
-export ANTHROPIC_MODEL=kimi-k2.5
+# 使用目录名 + provider 前缀作为会话名
+SESSION_NAME="kimi-$(basename "$TARGET_PATH")"
 
 # 构造命令
 SCRIPT="/tmp/claude-kimi-$$.sh"
 cat > "$SCRIPT" << EOF
 #!/bin/zsh -i
+# 启动后立刻删除临时脚本，避免留下启动痕迹
+rm -- "\$0"
 cd "$TARGET_PATH"
-exec /Users/suda/.local/bin/claude --dangerously-skip-permissions
+
+# 检查会话是否已存在
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  tmux new-window -t "$SESSION_NAME" -c "$TARGET_PATH"
+  tmux send-keys -t "$SESSION_NAME" "claude-kimi --permission-mode bypassPermissions" Enter
+  tmux attach -t "$SESSION_NAME"
+else
+  tmux new -s "$SESSION_NAME" -c "$TARGET_PATH" "zsh -lic 'claude-kimi --permission-mode bypassPermissions'"
+fi
 EOF
 chmod +x "$SCRIPT"
 

@@ -23,17 +23,25 @@ tell application "Finder"
   end if
 end tell')
 
-# Minimax 环境变量
-export ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic
-export ANTHROPIC_AUTH_TOKEN=$MINIMAX_TOKEN
-export ANTHROPIC_MODEL=MiniMax-M2.1
+# 使用目录名 + provider 前缀作为会话名
+SESSION_NAME="minimax-$(basename "$TARGET_PATH")"
 
 # 构造命令
 SCRIPT="/tmp/claude-minimax-$$.sh"
 cat > "$SCRIPT" << EOF
 #!/bin/zsh -i
+# 启动后立刻删除临时脚本，避免留下启动痕迹
+rm -- "\$0"
 cd "$TARGET_PATH"
-exec /Users/suda/.local/bin/claude --dangerously-skip-permissions
+
+# 检查会话是否已存在
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  tmux new-window -t "$SESSION_NAME" -c "$TARGET_PATH"
+  tmux send-keys -t "$SESSION_NAME" "claude-minimax --permission-mode bypassPermissions" Enter
+  tmux attach -t "$SESSION_NAME"
+else
+  tmux new -s "$SESSION_NAME" -c "$TARGET_PATH" "zsh -lic 'claude-minimax --permission-mode bypassPermissions'"
+fi
 EOF
 chmod +x "$SCRIPT"
 
