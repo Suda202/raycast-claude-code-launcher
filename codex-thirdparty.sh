@@ -10,18 +10,20 @@
 # @raycast.packageName Codex
 
 # Documentation:
-# @raycast.description 启动第三方 API 版 Codex App
+# @raycast.description 启动 ChatGPT 内的第三方 API 版 Codex
 # @raycast.author suda
 
 set -Eeuo pipefail
 
-CODEX_APP="/Applications/Codex.app"
-CODEX_BIN="$CODEX_APP/Contents/MacOS/Codex"
+CODEX_APP="/Applications/ChatGPT.app"
+CODEX_BIN="$CODEX_APP/Contents/MacOS/ChatGPT"
 CODEX_HOME_DIR="$HOME/.codex-thirdparty"
 OFFICIAL_CODEX_HOME="$HOME/.codex"
 USER_DATA_DIR="$HOME/Library/Application Support/Codex-ThirdParty"
 LAUNCH_CWD="$HOME/Documents/Codex"
 LOG_FILE="/tmp/codex-thirdparty.log"
+CC_SWITCH_DB="$HOME/.cc-switch/cc-switch.db"
+CC_SWITCH_PROVIDER_ID="default"
 
 mkdir -p "$CODEX_HOME_DIR" "$USER_DATA_DIR" "$LAUNCH_CWD"
 
@@ -42,8 +44,8 @@ sqlite_table_exists() {
 log_event "triggered ppid=$PPID"
 
 if [ ! -x "$CODEX_BIN" ]; then
-  echo "Codex App not found: $CODEX_BIN"
-  log_event "missing codex binary path=$CODEX_BIN"
+  echo "ChatGPT App not found: $CODEX_BIN"
+  log_event "missing ChatGPT binary path=$CODEX_BIN"
   exit 1
 fi
 
@@ -77,7 +79,40 @@ import_official_history() {
 PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = OFF;
 ATTACH DATABASE '$OFFICIAL_CODEX_HOME/state_5.sqlite' AS official;
-INSERT OR IGNORE INTO threads
+INSERT OR IGNORE INTO threads (
+    id,
+    rollout_path,
+    created_at,
+    updated_at,
+    source,
+    model_provider,
+    cwd,
+    title,
+    sandbox_policy,
+    approval_mode,
+    tokens_used,
+    has_user_event,
+    archived,
+    archived_at,
+    git_sha,
+    git_branch,
+    git_origin_url,
+    cli_version,
+    first_user_message,
+    agent_nickname,
+    agent_role,
+    memory_mode,
+    model,
+    reasoning_effort,
+    agent_path,
+    created_at_ms,
+    updated_at_ms,
+    thread_source,
+    preview,
+    recency_at,
+    recency_at_ms,
+    history_mode
+  )
   SELECT
     id,
     replace(rollout_path, '$OFFICIAL_CODEX_HOME', '$CODEX_HOME_DIR'),
@@ -109,7 +144,8 @@ INSERT OR IGNORE INTO threads
     thread_source,
     preview,
     recency_at,
-    recency_at_ms
+    recency_at_ms,
+    history_mode
   FROM official.threads;
 INSERT OR IGNORE INTO thread_dynamic_tools SELECT * FROM official.thread_dynamic_tools;
 INSERT OR IGNORE INTO thread_spawn_edges SELECT * FROM official.thread_spawn_edges;
@@ -366,9 +402,12 @@ NODE
 }
 
 thirdparty_main_pid() {
-  ps -axo pid=,ppid=,command= 2>/dev/null | awk -v dir="$USER_DATA_DIR" '
-    index($0, "/Applications/Codex.app/Contents/MacOS/Codex --user-data-dir=" dir) { main_pid = $1 }
-    index($0, "--user-data-dir=" dir) && index($0, "/Applications/Codex.app/Contents/Frameworks/") { helper_parent_pid = $2 }
+  ps -axo pid=,ppid=,command= 2>/dev/null | awk \
+    -v app_bin="$CODEX_BIN" \
+    -v framework_dir="$CODEX_APP/Contents/Frameworks/" \
+    -v dir="$USER_DATA_DIR" '
+    index($0, app_bin " --user-data-dir=" dir) { main_pid = $1 }
+    index($0, "--user-data-dir=" dir) && index($0, framework_dir) { helper_parent_pid = $2 }
     END {
       if (main_pid) print main_pid;
       else if (helper_parent_pid) print helper_parent_pid;
@@ -400,19 +439,12 @@ activate_existing_instance() {
   pid="$(thirdparty_main_pid)"
   [ -n "$pid" ] || return 1
 
-  if ! /usr/bin/osascript -l JavaScript -e '
-    ObjC.import("AppKit");
-    function run(argv) {
-      const pid = Number(argv[0]);
-      const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
-      if (!app) {
-        throw new Error("Codex ThirdParty process not found");
-      }
-      if (!app.activateWithOptions($.NSApplicationActivateAllWindows | $.NSApplicationActivateIgnoringOtherApps)) {
-        throw new Error("Codex ThirdParty activation failed");
-      }
-    }
-  ' "$pid" >/dev/null 2>>"$LOG_FILE"; then
+  if ! /usr/bin/osascript \
+    -e 'on run argv' \
+    -e 'set targetPID to (item 1 of argv) as integer' \
+    -e 'tell application "System Events" to set frontmost of first process whose unix id is targetPID to true' \
+    -e 'end run' \
+    "$pid" >/dev/null 2>>"$LOG_FILE"; then
     printf '%s failed to activate existing Codex ThirdParty pid=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pid" >>"$LOG_FILE"
     return 1
   else
@@ -437,6 +469,51 @@ launch_instance() {
   log_event "launch command sent"
 }
 
+sync_cc_switch_api_key() {
+  if ! command -v sqlite3 >/dev/null 2>&1 || [ ! -r "$CC_SWITCH_DB" ]; then
+    log_event "cc-switch database unavailable; keeping existing third-party credential"
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log_event "jq unavailable; keeping existing third-party credential"
+    return 0
+  fi
+
+  cc_switch_key="$(sqlite3 -batch -noheader "$CC_SWITCH_DB" \
+    "SELECT json_extract(settings_config, '$.auth.OPENAI_API_KEY') FROM providers WHERE app_type = 'codex' AND id = '$CC_SWITCH_PROVIDER_ID' LIMIT 1;" \
+    2>/dev/null || true)"
+
+  if [ -z "$cc_switch_key" ]; then
+    log_event "cc-switch provider id=$CC_SWITCH_PROVIDER_ID has no API key; keeping existing third-party credential"
+    return 0
+  fi
+
+  auth_file="$CODEX_HOME_DIR/auth.json"
+  current_key=""
+  if [ -f "$auth_file" ]; then
+    current_key="$(jq -r '.OPENAI_API_KEY // empty' "$auth_file" 2>/dev/null || true)"
+  fi
+
+  if [ "$current_key" = "$cc_switch_key" ]; then
+    log_event "cc-switch API key already synchronized"
+    unset cc_switch_key current_key
+    return 0
+  fi
+
+  umask 077
+  auth_tmp="$(mktemp "$CODEX_HOME_DIR/auth.json.tmp.XXXXXX")"
+  if [ -f "$auth_file" ]; then
+    OPENAI_API_KEY="$cc_switch_key" jq '.OPENAI_API_KEY = env.OPENAI_API_KEY' "$auth_file" >"$auth_tmp"
+  else
+    OPENAI_API_KEY="$cc_switch_key" jq -n '{OPENAI_API_KEY: env.OPENAI_API_KEY}' >"$auth_tmp"
+  fi
+  chmod 600 "$auth_tmp"
+  mv "$auth_tmp" "$auth_file"
+  log_event "synchronized API key from cc-switch provider id=$CC_SWITCH_PROVIDER_ID"
+  unset cc_switch_key current_key auth_tmp
+}
+
 if [ "${CODEX_LAUNCH_DRY_RUN:-}" = "1" ]; then
   echo "CODEX_HOME=$CODEX_HOME_DIR"
   echo "CODEX_ELECTRON_USER_DATA_PATH=$USER_DATA_DIR"
@@ -444,6 +521,8 @@ if [ "${CODEX_LAUNCH_DRY_RUN:-}" = "1" ]; then
   echo "$CODEX_BIN"
   exit 0
 fi
+
+sync_cc_switch_api_key
 
 set +e
 import_official_history
