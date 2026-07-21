@@ -74,6 +74,19 @@ GHOSTTY_LAUNCH_MODE="${GHOSTTY_LAUNCH_MODE:-direct}"
 - Claude Code CLI 或 Codex CLI
 - 可选：cc switch
 
+## Codex ThirdParty 每周更新
+
+`codex-thirdparty-update.sh` 用官方 `/Applications/ChatGPT.app` 刷新独立的 `~/Applications/Codex ThirdParty.app`：
+
+```bash
+./codex-thirdparty-update.sh --check
+./codex-thirdparty-update.sh --update
+```
+
+更新器只处理 App Bundle，不修改 `~/.codex-thirdparty` 的聊天记录、认证和模型配置。ThirdParty 正在运行时会返回 `status=deferred`，不会强退或覆盖；复制、签名或安装后验证失败时会保留或恢复旧版。
+
+本机通过 Codex 自动化每周日 10:00 执行一次 `--update`。完整设计见 `docs/superpowers/specs/2026-07-12-codex-thirdparty-app-auto-refresh-design.md`。
+
 ## License
 
 MIT

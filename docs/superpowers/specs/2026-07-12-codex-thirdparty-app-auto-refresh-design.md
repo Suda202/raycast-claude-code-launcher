@@ -1,57 +1,74 @@
-# Codex ThirdParty 应用副本自动更新设计
+# Codex ThirdParty 每周更新设计
 
 ## 目标
 
-官方 `/Applications/ChatGPT.app` 更新后，下一次启动 `Codex ThirdParty` 时自动刷新独立应用副本，避免副本版本过旧而无法启动，同时继续保持以下隔离：
+官方 `/Applications/ChatGPT.app` 更新后，每周自动检查一次独立的 `~/Applications/Codex ThirdParty.app`。发现新版时安全刷新 App 副本，同时保持第三方实例的身份和数据隔离。
 
-- 默认 ChatGPT/Codex 使用 `~/.codex`，由 CC Switch 当前 Provider 决定走官方账号或 API。
-- Codex ThirdParty 使用 `~/.codex-thirdparty` 和独立 Electron 用户数据目录。
-- macOS 与 Raycast 将两个实例识别为不同应用。
+不修改以下目录，因此更新不会影响聊天记录、认证或第三方模型配置：
 
-## 方案
+- `~/.codex-thirdparty`
+- `~/Library/Application Support/Codex-ThirdParty`
 
-采用“启动时按需同步”，不增加后台守护进程。
+## 结构
 
-启动脚本读取官方应用的 `CFBundleShortVersionString` 与 `CFBundleVersion`，组成源版本指纹。只有同时满足“第三方实例未运行”且以下任一条件时才刷新副本：
+更新逻辑集中在 `codex-thirdparty-update.sh`，Raycast 启动脚本不负责复制 1.4GB App。Codex 自动化每周调用一次：
 
-- 副本不存在或主程序不可执行；
-- 已保存的源版本指纹与官方应用不一致；
-- 副本的 Bundle ID 不是 `com.openai.codex.thirdparty`。
+```bash
+./codex-thirdparty-update.sh --update
+```
 
-版本一致时直接启动，不复制 1.4GB 应用文件。
+更新器提供两个入口：
 
-## 刷新流程
+- `--check`：只比较官方与 ThirdParty 的版本、Build、Bundle ID 和版本标记，不写入。
+- `--update`：需要更新且 ThirdParty 未运行时，执行安全刷新。
 
-1. 将官方应用复制到 `~/Applications` 下的临时目录。
-2. 把副本名称改为 `Codex ThirdParty`，Bundle ID 改为 `com.openai.codex.thirdparty`，并移除会干扰搜索的官方别名。
-3. 对临时副本执行本机 ad-hoc 深度签名，并用 `codesign --verify --deep --strict` 验证。
-4. 再次读取官方版本指纹；若复制期间官方应用发生变化，则放弃本次刷新，保留旧副本。
-5. 先把旧副本重命名为回滚副本，再把新副本原子移动到正式路径。
-6. 新副本就位后保存源版本指纹，再删除回滚副本。
+## 安全刷新流程
 
-聊天记录、认证、API 配置和数据库均位于应用包之外，因此刷新应用副本不会修改这些数据。
+1. 读取官方 App 的 `CFBundleShortVersionString` 和 `CFBundleVersion`。
+2. 若 ThirdParty 版本、Bundle ID 和版本标记均一致，直接返回 `status=current`。
+3. 若 ThirdParty 正在运行，返回 `status=deferred`，不退出应用、不替换文件。
+4. 获取目录锁，避免人工执行与每周任务同时复制。
+5. 在 `~/Applications` 同一文件系统创建临时目录，用 `ditto` 完整复制官方 App。
+6. 将临时副本改为独立身份：
+   - `CFBundleIdentifier = com.openai.codex.thirdparty`
+   - `CFBundleName = Codex ThirdParty`
+   - `CFBundleDisplayName = Codex ThirdParty`
+   - 删除官方的 `Codex` 别名
+7. 对临时副本执行 ad-hoc 深度签名并严格验证。
+8. 再次读取官方版本；若复制期间官方 App 发生变化，本次失败并保留旧版。
+9. 把旧副本移入临时回滚位置，再原子换入新副本。
+10. 对正式路径再次验证签名、版本和 Bundle ID；失败则恢复旧副本。
+11. 写入 `~/.codex-thirdparty/.thirdparty-app-source-build`，清理临时目录。
 
-## 失败处理
+## 状态与失败处理
 
-- 复制、修改身份、签名或验证失败时，不替换旧副本。
-- 若旧副本仍可执行，则记录错误并继续启动旧副本。
-- 若没有可用旧副本，则启动脚本明确失败，并把原因写入 `/tmp/codex-thirdparty.log`。
-- 第三方实例已经运行时只激活现有窗口，不在运行中替换应用文件；更新延迟到下一次冷启动。
+- `status=current`：已经是最新版。
+- `status=updated`：更新完成，自动化复核版本和签名。
+- `status=deferred`：App 正在运行或已有更新任务；本次不改动。
+- `status=failed`：复制、签名、竞态或安装后验证失败；旧副本保持可用。
+
+自动化不得为了更新而强退 App。若本周延后，下周继续检查，也可以在退出 ThirdParty 后手动执行更新器。
+
+## 调度
+
+- 周期：每周一次
+- 时间：每周日 10:00
+- 时区：Asia/Singapore（由本机 Codex 自动化使用本地时区执行）
+- 执行环境：本机项目 `/Users/suda/Projects/raycast-scripts`
 
 ## 验证
 
-使用临时小型 `.app` fixture 做回归测试，不复制真实 1.4GB 应用：
+fixture 回归测试覆盖：
 
-1. 源版本与标记一致时不刷新。
-2. 源版本变化时刷新，并写入新的独立 Bundle ID 与版本标记。
-3. 模拟签名失败时保留旧副本。
-4. 复制期间源版本变化时放弃刷新并保留旧副本。
-5. 第三方实例正在运行时跳过刷新。
-6. 运行 Shell 语法检查、签名验证和启动 dry-run。
+1. 版本一致时不复制。
+2. 旧版正确更新并重写独立身份。
+3. App 运行中延后。
+4. 签名失败保留旧版。
+5. 官方 App 在复制期间变化时保留旧版。
+6. 副本缺失时可重建。
+7. 安装后验证失败时回滚。
+8. 并发更新时跳过第二个任务。
+9. 崩溃遗留的失效锁可自动恢复。
+10. 首次安装后的验证失败不会留下破损 App。
 
-## 边界
-
-- 不自动更新官方应用；官方更新仍由官方更新器负责。
-- 不引入 LaunchAgent 或常驻文件监听。
-- 不修改 CC Switch 的 Provider 选择逻辑。
-- 不把聊天记录或认证数据复制进应用包。
+此外使用官方真实 App 做临时端到端复制，验证 `ditto`、身份重写、ad-hoc 签名、严格签名校验和版本标记均能处理当前 1.4GB 应用包。
